@@ -38,11 +38,11 @@ CREATE TABLE orders.order_items (
 
 -- ---------------------------------------------------------------------------
 -- Transactional outbox: written in the SAME transaction as orders/order_items.
--- A relay (Step 2) polls unpublished rows and produces them to Kafka.
+-- A relay (Step 3) polls unpublished rows and produces them to Kafka.
 -- ---------------------------------------------------------------------------
 CREATE TABLE orders.outbox (
     -- Doubles as the event ID that consumers dedupe on. uuidv7 is time-ordered,
-    -- so ORDER BY id ~= insertion order (but NOT commit order -- see Step 2).
+    -- so ORDER BY id ~= insertion order (but NOT commit order -- see Step 3).
     id             uuid        PRIMARY KEY DEFAULT uuidv7(),
     aggregate_type text        NOT NULL,          -- 'order'
     aggregate_id   uuid        NOT NULL,          -- used as the Kafka message key -> partition
