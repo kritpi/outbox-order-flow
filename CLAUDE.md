@@ -30,8 +30,9 @@ At each boundary below, **stop before writing the file**. Explain the mechanism 
 about 10 lines, give a recommendation, ask the user to confirm or choose, and continue
 once they answer.
 
-- Outbox relay: polling query, batch size, `FOR UPDATE SKIP LOCKED`, publish-then-mark
-  ordering, and what a crash between publish and mark causes.
+- Outbox relay details ADR-0006 leaves open: batch size, holding row locks while producing
+  vs a lease, several relay instances without breaking per-order ordering, and how each
+  Go client error maps to "retry" or "park".
 - Kafka client config: producer acks and idempotence, and when consumer offsets commit
   relative to the DB transaction.
 - Inventory reservation: lock strategy (`SELECT … FOR UPDATE` in `sku` order vs the

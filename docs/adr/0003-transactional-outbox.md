@@ -32,5 +32,6 @@ Kafka and marks them published.
   consistent.
 - Published rows accumulate and eventually need a cleanup job. Until then, the partial
   index on unpublished rows keeps relay polling cheap.
-- The relay itself (batching, `FOR UPDATE SKIP LOCKED`, several relay instances vs
-  per-order ordering) is the Step 3 checkpoint.
+- The relay's polling, retry, and ordering policy is
+  [ADR-0006](0006-outbox-relay-polling-retries.md). How rows are claimed (lock duration,
+  several relay instances) is still the Step 3 checkpoint.

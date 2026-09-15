@@ -130,6 +130,7 @@ as ADRs:
 | [0003](docs/adr/0003-transactional-outbox.md) | Publish events through a transactional outbox |
 | [0004](docs/adr/0004-idempotent-consumers.md) | Idempotent consumers: dedupe in the side-effect transaction, then commit the offset |
 | [0005](docs/adr/0005-single-module-shared-platform.md) | One Go module: shared platform code, service packages isolated by import rules |
+| [0006](docs/adr/0006-outbox-relay-polling-retries.md) | Outbox relay: polling with backoff retries and per-order ordering |
 
 Decisions still open are listed in [AGENTS.md](AGENTS.md#open-decisions).
 
@@ -241,7 +242,7 @@ make psql                       # then: SELECT * FROM inventory.products;
 
 - [x] **Step 1: Infrastructure and schema.** Docker Compose, migrations, topics, seed data.
 - [ ] **Step 2: Order Service and outbox write.** Per-service Postgres roles; Go module skeleton with the import-boundary test; `POST /orders` writes order + outbox in one transaction; HTTP idempotency key.
-- [ ] **Step 3: Outbox relay.** `internal/platform/outbox`: polling with `FOR UPDATE SKIP LOCKED`, batching, publish-then-mark, ordering guarantees.
+- [ ] **Step 3: Outbox relay.** `internal/platform/outbox`: polling every 250 ms with `FOR UPDATE SKIP LOCKED`, batching, publish-then-mark, capped exponential backoff, parking events that can't be published, per-order ordering ([ADR-0006](docs/adr/0006-outbox-relay-polling-retries.md)); migration `000004` for retry columns.
 - [ ] **Step 4: Inventory Service.** Consume `order.created`, lock rows, reserve stock, dedupe, publish the result via its own outbox.
 - [ ] **Step 5: Status update and Notification Service.** Close the loop; idempotent side effects.
 - [ ] **Step 6: Query endpoints.** Order status and current inventory.
@@ -249,6 +250,11 @@ make psql                       # then: SELECT * FROM inventory.products;
 - [ ] **Step 8: Concurrency lab.** Pessimistic vs optimistic locking under load; prove no overselling.
 - [ ] **Step 9: Observability.** Structured logs, metrics for processed events and outbox lag.
 - [ ] **Step 10: Order history.** Status-transition and event log table.
+
+### Stretch steps
+
+- [ ] **Stretch A: `LISTEN/NOTIFY` wake-up.** Add a doorbell trigger to the outbox relay, then compare end-to-end latency and outbox lag against polling alone (uses the Step 9 metrics).
+- [ ] **Stretch B: CDC relay with Debezium.** Replace the polling relay with Debezium reading outbox inserts from the WAL. The outbox table and consumers stay unchanged.
 
 
 

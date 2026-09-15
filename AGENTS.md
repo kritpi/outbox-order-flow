@@ -112,6 +112,9 @@ agreement and a new or superseding ADR.
    ([ADR-0005](docs/adr/0005-single-module-shared-platform.md))
 7. `inventory.products.available` keeps `CHECK (available >= 0)` as the backstop
    alongside application-level concurrency control.
+8. The outbox relay is the only publish path, and it never publishes an event while an
+   earlier event for the same aggregate is unpublished or parked.
+   ([ADR-0006](docs/adr/0006-outbox-relay-polling-retries.md))
 
 ## Project structure
 

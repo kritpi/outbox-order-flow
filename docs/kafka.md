@@ -5,8 +5,9 @@ guarantees, and what happens when something fails.
 
 - **Settings** in this document were read from the running broker (Redpanda v26.2.2).
 - **Design** comes from [ADR-0001](adr/0001-kafka-protocol-via-redpanda.md) (Kafka protocol),
-  [ADR-0003](adr/0003-transactional-outbox.md) (outbox), and
-  [ADR-0004](adr/0004-idempotent-consumers.md) (idempotent consumers).
+  [ADR-0003](adr/0003-transactional-outbox.md) (outbox),
+  [ADR-0004](adr/0004-idempotent-consumers.md) (idempotent consumers), and
+  [ADR-0006](adr/0006-outbox-relay-polling-retries.md) (outbox relay).
 - Anything marked **proposed** is still an open decision in
   [AGENTS.md](../AGENTS.md#open-decisions) and gets settled at the checkpoint named.
 
@@ -102,9 +103,10 @@ The partition is `hash(key) mod partition count`, so **every event for one order
 the same partition**, in the order it was produced. Kafka guarantees ordering only within a
 partition, and only when both of these hold:
 
-1. **Events for one order are produced in order.** This is the relay's job. Several relay
-   instances claiming rows with `FOR UPDATE SKIP LOCKED` could publish one order's events
-   out of order; that trade-off is the Step 3 checkpoint.
+1. **Events for one order are produced in order.** This is the relay's job: it never
+   publishes an event while an earlier event for the same order is still unpublished
+   ([ADR-0006](adr/0006-outbox-relay-polling-retries.md)). Keeping that rule with several
+   relay instances claiming rows via `FOR UPDATE SKIP LOCKED` is the Step 3 checkpoint.
 2. **The consumer processes each partition sequentially.** Processing messages from one
    partition in parallel gives up per-order ordering.
 
@@ -132,6 +134,23 @@ order. That's fine: independent orders don't depend on each other.
 - **A rebalance moves partitions.** When an instance joins, leaves, or crashes, its
   partitions go to others. Messages it processed but hadn't committed offsets for are
   delivered again to the new owner, and the dedupe key makes that harmless.
+
+## Outbox relay
+
+Decided in [ADR-0006](adr/0006-outbox-relay-polling-retries.md); the code arrives in
+Step 3.
+
+| Aspect | Behaviour |
+|---|---|
+| Wake-up | Every 250 ms (configurable); again immediately while batches come back full; when the earliest retry is due |
+| Claim | Due, unpublished rows in `id` order, skipping rows whose order still has an earlier unpublished event |
+| Success | `published_at = now()` once the broker acknowledges |
+| Transient failure | `attempts + 1`, `last_error`, `next_attempt_at = now() + min(60 s, 1 s × 2^attempts)` plus jitter; retried indefinitely |
+| Failure retrying can't fix | Row parked (no more retries) with an alert; that order's later events wait behind it |
+| Health signals | Outbox lag (age of the oldest unpublished row) and the parked-row count |
+
+`next_attempt_at` and the parked marker don't exist yet; migration `000004` adds them. A
+`LISTEN/NOTIFY` wake-up and a Debezium CDC relay are stretch steps on the roadmap.
 
 ## Delivery guarantees, end to end
 
@@ -172,8 +191,9 @@ sequenceDiagram
 
 | What fails | What happens | Why nothing is lost or doubled |
 |---|---|---|
-| Broker is down when an order is placed | The order and its outbox row commit; the relay retries until the broker is back | The API never talks to Kafka directly |
+| Broker is down when an order is placed | The order and its outbox row commit; the relay retries with capped backoff until the broker is back | The API never talks to Kafka directly |
 | Relay crashes after producing, before marking published | Those rows are published again on restart | Consumers drop the duplicates by `event_id` |
+| An event can never be published (e.g. larger than 1 MiB) | The relay parks the row and alerts; later events for that order wait behind it | **Needs a person** to fix and release the row. Other orders keep flowing |
 | Consumer crashes before its transaction commits | The transaction rolls back and the offset isn't committed; the message is redelivered | It's processed normally on the retry |
 | Consumer crashes after its transaction commits, before committing the offset | The message is redelivered | The dedupe insert conflicts, the handler skips it, and the offset advances |
 | Rebalance in the middle of a batch | Uncommitted messages go to another instance | Same as above: dedupe makes the repeat a no-op |
@@ -188,7 +208,8 @@ sequenceDiagram
 | Producer acknowledgements and idempotence | `acks=all` with the idempotent producer (proposed) vs faster, weaker settings | Step 3 checkpoint |
 | Offset commits | After the database commit (decided, ADR-0004); synchronous vs asynchronous, per message vs per batch | Step 4 checkpoint |
 | Starting position for a new group | `earliest`, so a new consumer processes the backlog (proposed), vs `latest` | Step 4 checkpoint |
-| Retries, backoff, dead-letter topics | e.g. a `<topic>.dlq` topic per consumed topic | Step 7 checkpoint |
+| Relay claiming | Batch size; holding row locks while producing vs a lease; several relay instances without breaking per-order ordering | Step 3 checkpoint |
+| Consumer retries, backoff, dead-letter topics | e.g. a `<topic>.dlq` topic per consumed topic | Step 7 checkpoint |
 | Event names, topic layout, event contracts | Open decisions #2, #3, #5 | Step 2 checkpoint |
 | Go Kafka client | `twmb/franz-go` proposed (open decision #4) | Step 2 checkpoint |
 
