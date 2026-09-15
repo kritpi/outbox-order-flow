@@ -1,0 +1,230 @@
+# AGENTS.md
+
+Project context for AI coding agents. The human overview, endpoints, sample data, and
+every Make target are in [README.md](README.md). The reasons behind the architecture are
+in [docs/adr/](docs/adr/).
+
+## Project
+
+An event-driven order processing system in Go, built as a **learning project** for the
+transactional outbox, concurrency control on shared inventory, idempotent consumers, and
+Kafka delivery semantics. Understanding the mechanism matters as much as working code.
+
+Flow: the Order Service accepts an order → the Inventory Service reserves stock → the
+order's status is updated → the Notification Service sends a (mock) notification.
+Services communicate only through Kafka topics.
+
+**Status:** Step 1 (infrastructure and schema) is done; Go code starts in Step 2. The
+roadmap is in the README.
+
+## Architecture
+
+### Event flow
+
+```mermaid
+flowchart LR
+    client([HTTP client]) -->|POST /orders| OS[Order Service]
+    OS -->|"one tx: orders + outbox"| ODB[(orders schema)]
+    ODB -.->|outbox relay| OT{{orders.events}}
+    OT --> IS[Inventory Service]
+    IS -->|"one tx: dedupe + stock + reservation + outbox"| IDB[(inventory schema)]
+    IDB -.->|outbox relay| IT{{inventory.events}}
+    IT --> OS
+    IT --> NS[Notification Service]
+    NS -->|"dedupe + log"| NDB[(notification schema)]
+```
+
+### Services
+
+| | Order Service | Inventory Service | Notification Service |
+|---|---|---|---|
+| Kind | HTTP API + consumer | Consumer | Consumer |
+| Postgres schema | `orders` | `inventory` | `notification` |
+| Postgres role | `order_svc` | `inventory_svc` | `notification_svc` |
+| Consumer group | `order-service` | `inventory-service` | `notification-service` |
+| Consumes | `inventory.events` | `orders.events` | `inventory.events` |
+| Produces (through its outbox) | `orders.events` | `inventory.events` | none |
+
+- The Postgres roles are accepted ([ADR-0002](docs/adr/0002-shared-database-schema-per-service.md))
+  but not created yet; every connection currently uses the `orderflow` admin user.
+- The Order Service consuming `inventory.events` is proposed (Open decisions #1).
+- The Order and Notification services use **separate** consumer groups, so each receives
+  every message on `inventory.events`.
+
+### Runtime: what is shared
+
+```
+┌─ SEPARATE PROCESSES ──────────────────────────────────────────────────────────┐
+│  order-service           inventory-service        notification-service        │
+│  pool: order_svc         pool: inventory_svc      pool: notification_svc      │
+│  group: order-service    group: inventory-service group: notification-service │
+└───────────────────────────────────────────────────────────────────────────────┘
+                     │ each process opens its own connections
+                     ▼
+┌─ SHARED SERVERS ──────────────────────────────────────────────────────────────┐
+│  Postgres (1 instance): schemas orders, inventory, notification               │
+│  Redpanda (1 cluster):  topics orders.events, inventory.events                │
+└───────────────────────────────────────────────────────────────────────────────┘
+  SHARED CODE     internal/platform is compiled into each program separately
+  COMMUNICATION   Kafka topics only: no HTTP between services, no shared tables
+```
+
+| Layer | Shared? | Meaning |
+|---|---|---|
+| Servers | Yes, one of each | One Postgres instance and one Redpanda cluster |
+| Source code | Yes, written once | `internal/platform` is built into every service |
+| Runtime resources | Never | Each process owns its pool, Kafka client, credentials, and consumer group |
+| Communication | Topics only | A service never calls another or reads its tables |
+
+### Topics
+
+| Topic | Producer | Consumers | Event types |
+|---|---|---|---|
+| `orders.events` | Order Service | Inventory Service | `order.created` |
+| `inventory.events` | Inventory Service | Order Service, Notification Service | stock reserved / reservation failed (Open decisions #2) |
+
+One topic per publishing service, with the event type in a message header. The message
+key is the order ID. Each topic has 3 partitions and replication factor 1, and is
+declared in `redpanda-init`; broker auto-creation is off. The layout itself is Open
+decision #3.
+
+## Architecture invariants
+
+Keep these true in every change. A change that would break one needs the user's
+agreement and a new or superseding ADR.
+
+1. Each service reads and writes only its own schema. Data crosses services only through
+   events: no cross-schema foreign keys, joins, or queries.
+   ([ADR-0002](docs/adr/0002-shared-database-schema-per-service.md))
+2. A transaction touches exactly one service's schema.
+   ([ADR-0002](docs/adr/0002-shared-database-schema-per-service.md))
+3. A state change and its event commit in one transaction. The event is a row in that
+   service's `outbox`, and only the outbox relay produces to Kafka.
+   ([ADR-0003](docs/adr/0003-transactional-outbox.md))
+4. The Kafka message key is the aggregate ID (the order ID).
+   ([ADR-0003](docs/adr/0003-transactional-outbox.md))
+5. Consumers dedupe on the event ID in the same transaction as the side effect, and
+   commit the Kafka offset only after that transaction commits.
+   ([ADR-0004](docs/adr/0004-idempotent-consumers.md))
+6. Imports point one way: `cmd/<svc>` → `internal/<svc>` → `internal/platform`.
+   `platform` holds mechanics only, with no business logic and no package-level state.
+   ([ADR-0005](docs/adr/0005-single-module-shared-platform.md))
+7. `inventory.products.available` keeps `CHECK (available >= 0)` as the backstop
+   alongside application-level concurrency control.
+
+## Project structure
+
+### Today
+
+```
+.
+├── AGENTS.md              # this file: architecture, structure, conventions
+├── CLAUDE.md              # imports this file; adds Claude's pair-programming role
+├── README.md              # human overview, setup, endpoints, roadmap
+├── docs/adr/              # architecture decision records (NNNN-slug.md)
+├── docker-compose.yml     # postgres, migrate, redpanda, redpanda-init, console
+├── Makefile               # dev workflow; `make help` lists targets
+├── migrations/            # golang-migrate: flat NNNNNN_<name>.up.sql / .down.sql pairs
+└── db/seed/dev_seed.sql   # local-only fixtures
+```
+
+### Go code (from Step 2, per ADR-0005)
+
+```
+cmd/
+  order-service/main.go         # wiring only: config → pool → Kafka client → run → shutdown
+  inventory-service/main.go
+  notification-service/main.go
+internal/
+  order/                        # Order Service business logic, HTTP handlers, repository
+  inventory/                    # Inventory Service business logic and handlers
+  notification/                 # Notification Service business logic and handlers
+  platform/                     # shared mechanics: no business logic, no package-level state
+    pg/  kafka/  config/  shutdown/
+    outbox/                     # relay: poll → publish → mark
+    consumer/                   # idempotent loop: dedupe + transaction + offset commit
+```
+
+```
+cmd/<svc> ──► internal/<svc> ──► internal/platform
+internal/inventory ──✗──► internal/order      (no service imports another)
+internal/platform  ──✗──► internal/<svc>      (plumbing never imports business code)
+```
+
+Where event contracts and service container files live is still open (Open decisions
+#5 and #6).
+
+## Conventions
+
+### Database
+
+- Migrations use golang-migrate in a **flat** `migrations/` directory of
+  `NNNNNN_<name>.up.sql` / `.down.sql` pairs. golang-migrate reads one directory and pairs
+  files by version, so subdirectories break `make up`. Create a pair with
+  `make migrate-new name=<snake_case>`. Once a migration is committed, change the schema
+  with a new migration rather than editing the old one.
+- Tables live in their service's schema. A publishing service has its own `outbox`; a
+  consuming service has its own dedupe table.
+- IDs are `uuid DEFAULT uuidv7()`, timestamps are `timestamptz`, and states are `text` with
+  a `CHECK` constraint rather than enum types (a `CHECK` is easy to change in a
+  migration).
+- Every non-obvious column, constraint, or index gets a comment explaining why, as in
+  the existing migrations.
+- Dev fixtures go in `db/seed/` and stay idempotent (`ON CONFLICT … DO UPDATE`).
+
+### Broker
+
+- A new topic goes into the `redpanda-init` loop in `docker-compose.yml`, created with
+  `--if-not-exists`.
+- Each service consumes with its own named consumer group. `make consume` reads without
+  a group, so it never moves a service's offsets.
+
+### General
+
+- Pin exact versions for container images and Go modules.
+- Comments explain *why*: the mechanism or trade-off.
+- Verify before reporting. Run the stack, the relevant queries or `make consume`, and the
+  tests. Show the output and say what stayed unverified.
+- Keep docs in sync within the same change:
+  - An architecture or structure change → this file and the README.
+  - A decision that is hard to reverse, surprising, and the result of a real trade-off → a
+    new ADR with the next number. Supersede an accepted ADR rather than rewriting it.
+  - A finished step → tick it in the README roadmap.
+- Commit only when the user asks.
+
+## Setup
+
+```bash
+make up     # Postgres + Redpanda, migrations, topics; waits for the one-shot containers
+make seed   # sample inventory (idempotent)
+make help   # every target
+```
+
+Go services running on the host connect to Postgres at `localhost:5432` and Kafka at
+`localhost:19092`. Containers use `postgres:5432` and `redpanda:9092`. Redpanda
+advertises a different address per listener, so a client given the wrong one reaches
+the first broker and then fails when it reconnects. Console UI: http://localhost:8090.
+
+A healthy stack: in `make ps`, postgres and redpanda are healthy and migrate and
+redpanda-init show `Exited (0)`. `make migrate-version` prints the latest migration
+number.
+
+## Open decisions
+
+Settle these at the Step 2 checkpoint. When one is settled, write an ADR if it meets the
+bar above, update this file and the README, and delete the item here.
+
+1. **Order status owner.** Proposed: the Order Service consumes `inventory.events` and
+   updates its own `orders.orders`. The original brief had the Notification Service write
+   it.
+2. **Inventory event names.** Proposed: name them as facts in the publisher's domain
+   (`inventory.reserved`, `inventory.reservation_failed`). The brief used
+   `order.reserved` / `order.failed`.
+3. **Topic layout.** Currently implemented as one topic per publishing service, with
+   the event type in a header. The alternative is one topic per event type.
+4. **Go libraries.** Proposed: `jackc/pgx/v5` and `twmb/franz-go`.
+5. **Event contracts.** One shared `internal/events` package, or each consumer defining
+   the fields it reads.
+6. **Service containers.** Proposed: services run on the host with `go run` through
+   Step 5. After that, add a Dockerfile plus one compose file per service, pulled into the
+   root file with `include:`.
