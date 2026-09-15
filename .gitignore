@@ -1,0 +1,13 @@
+# Go build output
+/bin/
+*.test
+*.out
+
+# Local env overrides
+.env
+.env.local
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

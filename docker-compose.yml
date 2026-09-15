@@ -1,0 +1,125 @@
+name: orderflow
+
+# Connection string used by containers on the compose network.
+# Go services running on your host use localhost:5432 instead.
+x-pg-url: &pg_url "postgres://orderflow:orderflow@postgres:5432/orderflow?sslmode=disable"
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL: one instance, one database, one schema per service.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:18.6-alpine
+    environment:
+      POSTGRES_USER: orderflow
+      POSTGRES_PASSWORD: orderflow
+      POSTGRES_DB: orderflow
+    command:
+      - postgres
+      # Log any statement stuck waiting on a lock > deadlock_timeout.
+      # This is how we'll *see* SELECT ... FOR UPDATE contention in Steps 4 and 8
+      # (inventory reservation, concurrency lab).
+      - -c
+      - log_lock_waits=on
+      - -c
+      - deadlock_timeout=1s
+      - -c
+      - log_min_duration_statement=250
+    ports:
+      - "5432:5432"
+    volumes:
+      # PG 18 images expect the mount at /var/lib/postgresql (not .../data).
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orderflow -d orderflow"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # One-shot: applies migrations/ then exits 0. Safe to re-run (tracks version).
+  migrate:
+    image: migrate/migrate:v4.19.1
+    volumes:
+      - ./migrations:/migrations
+    command: ["-path=/migrations", "-database", *pg_url, "up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Redpanda: Kafka-API-compatible broker, single binary, no ZooKeeper/KRaft setup.
+  # ---------------------------------------------------------------------------
+  redpanda:
+    image: redpandadata/redpanda:v26.2.2
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=1G
+      # Two listeners -- the classic Kafka-in-Docker gotcha. A client connects to a
+      # bootstrap address, then the broker tells it "reach me at <advertised addr>".
+      #   internal: containers on the compose network  -> redpanda:9092
+      #   external: Go services running on your host   -> localhost:19092
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --rpc-addr=redpanda:33145
+      - --advertise-rpc-addr=redpanda:33145
+      - --default-log-level=info
+    ports:
+      - "19092:19092"   # Kafka API (host)
+      - "9644:9644"     # Admin API
+    volumes:
+      - redpanda:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  # One-shot: cluster config + explicit topic creation, then exits 0.
+  redpanda-init:
+    image: redpandadata/redpanda:v26.2.2
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    environment:
+      RPK_BROKERS: redpanda:9092
+      RPK_ADMIN_HOSTS: redpanda:9644
+    # The image declares VOLUME /var/lib/redpanda/data; without this, every
+    # recreate of this one-shot container leaks an anonymous volume.
+    tmpfs:
+      - /var/lib/redpanda/data
+    entrypoint: ["/bin/bash", "-euo", "pipefail", "-c"]
+    command:
+      - |
+        # dev-container mode auto-creates topics on first produce. Turn that off so a
+        # typo'd topic name fails loudly instead of silently creating a new topic.
+        rpk cluster config set auto_create_topics_enabled false
+
+        # One topic per publishing aggregate; event_type travels in a header.
+        # (Layout still to be confirmed: AGENTS.md open decision #3.)
+        # 3 partitions so we can observe keyed ordering and consumer-group rebalances.
+        for topic in orders.events inventory.events; do
+          rpk topic create "$$topic" --partitions 3 --replicas 1 --if-not-exists
+        done
+        rpk topic list
+    restart: "no"
+
+  # Web UI for browsing topics, messages, and consumer-group lag.
+  console:
+    image: redpandadata/console:v3.8.0
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      REDPANDA_ADMINAPI_ENABLED: "true"
+      REDPANDA_ADMINAPI_URLS: http://redpanda:9644
+    ports:
+      - "8090:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redpanda:
