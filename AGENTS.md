@@ -86,7 +86,8 @@ flowchart LR
 One topic per publishing service, with the event type in a message header. The message
 key is the order ID. Each topic has 3 partitions and replication factor 1, and is
 declared in `redpanda-init`; broker auto-creation is off. The layout itself is Open
-decision #3.
+decision #3. Message anatomy, delivery guarantees, and failure behaviour are in
+[docs/kafka.md](docs/kafka.md).
 
 ## Architecture invariants
 
@@ -122,6 +123,8 @@ agreement and a new or superseding ADR.
 ├── CLAUDE.md              # imports this file; adds Claude's pair-programming role
 ├── README.md              # human overview, setup, endpoints, roadmap
 ├── docs/adr/              # architecture decision records (NNNN-slug.md)
+├── docs/database-schema.md  # ER diagrams (Mermaid), mirrors migrations/
+├── docs/kafka.md            # topics, message flow, delivery semantics, failure cases
 ├── docker-compose.yml     # postgres, migrate, redpanda, redpanda-init, console
 ├── Makefile               # dev workflow; `make help` lists targets
 ├── migrations/            # golang-migrate: flat NNNNNN_<name>.up.sql / .down.sql pairs
@@ -170,6 +173,8 @@ Where event contracts and service container files live is still open (Open decis
   migration).
 - Every non-obvious column, constraint, or index gets a comment explaining why, as in
   the existing migrations.
+- A migration that changes tables, keys, or constraints updates the ER diagrams in
+  [docs/database-schema.md](docs/database-schema.md) in the same change.
 - Dev fixtures go in `db/seed/` and stay idempotent (`ON CONFLICT … DO UPDATE`).
 
 ### Broker
@@ -178,6 +183,8 @@ Where event contracts and service container files live is still open (Open decis
   `--if-not-exists`.
 - Each service consumes with its own named consumer group. `make consume` reads without
   a group, so it never moves a service's offsets.
+- A change to topics, partition counts, message format, or delivery behaviour updates
+  [docs/kafka.md](docs/kafka.md) in the same change.
 
 ### General
 

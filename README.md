@@ -82,7 +82,8 @@ consuming `inventory.events` to update order status is still a proposal
 One topic per publishing aggregate. The event type travels in a message header, and
 the message **key is the order ID**, so every event for one order lands on the same
 partition in order. This layout is implemented but still to be confirmed
-([open decisions](AGENTS.md#open-decisions)).
+([open decisions](AGENTS.md#open-decisions)). How messages flow, what each delivery
+guarantee means, and how failures play out: [docs/kafka.md](docs/kafka.md).
 
 
 | Topic              | Partitions | Event types                                                                  |
@@ -95,6 +96,9 @@ Topic auto-creation is **disabled**: producing to a misspelled topic fails loudl
 instead of silently creating a new one.
 
 ### Database schema
+
+ER diagrams with every column, key, constraint, and cross-service reference:
+[docs/database-schema.md](docs/database-schema.md). Summary:
 
 ```
 orders.orders              id (uuidv7), customer_id, status, failure_reason, idempotency_key, version, timestamps
@@ -257,6 +261,8 @@ make psql                       # then: SELECT * FROM inventory.products;
 ├── migrations/            # golang-migrate SQL: NNNNNN_<name>.up.sql + .down.sql pairs, flat
 ├── db/seed/               # local-only fixtures (not migrations)
 ├── docs/adr/              # architecture decision records
+├── docs/database-schema.md  # ER diagrams for every schema
+├── docs/kafka.md            # topics, message flow, delivery semantics
 ├── AGENTS.md              # architecture, structure, and conventions for AI agents
 └── CLAUDE.md              # Claude's pair-programming role; imports AGENTS.md
 ```
