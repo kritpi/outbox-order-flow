@@ -78,3 +78,41 @@ groups: ## List consumer groups and their state
 group-lag: ## Per-partition offsets + lag: make group-lag group=inventory-service
 	@test -n "$(group)" || (echo "usage: make group-lag group=<name>  (see: make groups)" && exit 1)
 	$(COMPOSE) exec redpanda rpk group describe $(group)
+
+# --- go services -------------------------------------------------------------
+# Services run on the host and connect as their own role (migration 000004), which
+# reaches only that service's schema. Dev-only passwords: each equals the role name.
+svc_db_url = postgres://$(1)_svc:$(1)_svc@localhost:5432/orderflow?sslmode=disable
+
+.PHONY: run-order
+run-order: ## Run the Order Service on the host (HTTP on :8080)
+	DATABASE_URL='$(call svc_db_url,order)' go run ./cmd/order-service
+
+.PHONY: run-inventory
+run-inventory: ## Run the Inventory Service on the host
+	DATABASE_URL='$(call svc_db_url,inventory)' go run ./cmd/inventory-service
+
+.PHONY: run-notification
+run-notification: ## Run the Notification Service on the host
+	DATABASE_URL='$(call svc_db_url,notification)' go run ./cmd/notification-service
+
+.PHONY: build
+build: ## Build all three services into bin/
+	go build -o bin/ ./cmd/...
+
+.PHONY: test
+test: ## Run unit tests (with the race detector), including the import-boundary test
+	go test -race ./...
+
+.PHONY: vet
+vet: ## Run go vet
+	go vet ./...
+
+.PHONY: tidy
+tidy: ## Sync go.mod and go.sum with the imports
+	go mod tidy
+
+.PHONY: psql-svc
+psql-svc: ## psql as a service role, to try its limits: make psql-svc svc=order
+	@test -n "$(svc)" || (echo "usage: make psql-svc svc=order|inventory|notification" && exit 1)
+	$(COMPOSE) exec postgres psql -U $(svc)_svc -d orderflow

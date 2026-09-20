@@ -17,7 +17,7 @@ versioning overhead with no deployment or team boundary to justify it.
 
 - Imports point one way: `cmd/<svc>` → `internal/<svc>` → `internal/platform`. A service
   package never imports another service's package, and `platform` never imports a service
-  package. An import-boundary test enforces this; it arrives with the first Go code.
+  package. The import-boundary test in `internal/archtest` enforces this.
   (Go's `internal/` does not prevent imports between packages in the same module.)
 - `platform` provides constructors and reusable mechanics. It contains no business logic
   and no package-level state. Each service's `main` creates its own pool, Kafka client,
@@ -36,5 +36,5 @@ versioning overhead with no deployment or team boundary to justify it.
 
 ## Consequences
 
-- Where event contracts live (a shared `internal/events` package, or each consumer
-  defining the fields it reads) is still undecided.
+- Event contracts are defined by each consumer, with no shared package
+  ([ADR-0007](0007-event-contracts-consumer-defined.md)).

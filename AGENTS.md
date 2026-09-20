@@ -14,8 +14,9 @@ Flow: the Order Service accepts an order → the Inventory Service reserves stoc
 order's status is updated → the Notification Service sends a (mock) notification.
 Services communicate only through Kafka topics.
 
-**Status:** Step 1 (infrastructure and schema) is done; Go code starts in Step 2. The
-roadmap is in the README.
+**Status:** Step 1 (infrastructure and schema) and Step 2a (Go module skeleton, per-service
+Postgres roles, import-boundary test) are done. Next is Step 2b: `POST /orders`. The roadmap
+is in the README.
 
 ## Architecture
 
@@ -45,8 +46,10 @@ flowchart LR
 | Consumes | `inventory.events` | `orders.events` | `inventory.events` |
 | Produces (through its outbox) | `orders.events` | `inventory.events` | none |
 
-- The Postgres roles are accepted ([ADR-0002](docs/adr/0002-shared-database-schema-per-service.md))
-  but not created yet; every connection currently uses the `orderflow` admin user.
+- Each service connects as its own role (migration `000004`,
+  [ADR-0002](docs/adr/0002-shared-database-schema-per-service.md)), whose `search_path` is its
+  own schema, and refuses to start if `current_schema()` is anything else. Migrations,
+  `make psql`, and `make seed` use the `orderflow` admin user.
 - The Order Service consuming `inventory.events` is proposed (Open decisions #1).
 - The Order and Notification services use **separate** consumer groups, so each receives
   every message on `inventory.events`.
@@ -109,6 +112,7 @@ agreement and a new or superseding ADR.
    ([ADR-0004](docs/adr/0004-idempotent-consumers.md))
 6. Imports point one way: `cmd/<svc>` → `internal/<svc>` → `internal/platform`.
    `platform` holds mechanics only, with no business logic and no package-level state.
+   `internal/archtest` enforces the import rules.
    ([ADR-0005](docs/adr/0005-single-module-shared-platform.md))
 7. `inventory.products.available` keeps `CHECK (available >= 0)` as the backstop
    alongside application-level concurrency control.
@@ -125,8 +129,11 @@ agreement and a new or superseding ADR.
 ├── AGENTS.md              # this file: architecture, structure, conventions
 ├── CLAUDE.md              # imports this file; adds Claude's pair-programming role
 ├── README.md              # human overview, setup, endpoints, roadmap
+├── go.mod, go.sum         # one module: github.com/kritpi/outbox-order-flow (ADR-0005)
+├── cmd/                   # one main package per service: wiring only
+├── internal/              # service packages and shared platform mechanics (below)
 ├── docs/adr/              # architecture decision records (NNNN-slug.md)
-├── docs/database-schema.md  # ER diagrams (Mermaid), mirrors migrations/
+├── docs/database-schema.md  # ER diagrams (Mermaid) and role privileges, mirrors migrations/
 ├── docs/kafka.md            # topics, message flow, delivery semantics, failure cases
 ├── docker-compose.yml     # postgres, migrate, redpanda, redpanda-init, console
 ├── Makefile               # dev workflow; `make help` lists targets
@@ -134,22 +141,28 @@ agreement and a new or superseding ADR.
 └── db/seed/dev_seed.sql   # local-only fixtures
 ```
 
-### Go code (from Step 2, per ADR-0005)
+### Go code (ADR-0005)
 
 ```
 cmd/
-  order-service/main.go         # wiring only: config → pool → Kafka client → run → shutdown
+  order-service/main.go         # wiring only: signals → config → pool → role check → components → close pool
   inventory-service/main.go
   notification-service/main.go
 internal/
-  order/                        # Order Service business logic, HTTP handlers, repository
-  inventory/                    # Inventory Service business logic and handlers
-  notification/                 # Notification Service business logic and handlers
+  order/                        # Order Service: config, HTTP handlers (GET /healthz; POST /orders in 2b)
+  inventory/                    # Inventory Service: config, Run loop (consumer in Step 4)
+  notification/                 # Notification Service: config, Run loop (consumer in Step 5)
   platform/                     # shared mechanics: no business logic, no package-level state
-    pg/  kafka/  config/  shutdown/
-    outbox/                     # relay: poll → publish → mark
-    consumer/                   # idempotent loop: dedupe + transaction + offset commit
+    config/                     # env vars; reports every missing or invalid one at once
+    pg/                         # pgxpool with a startup ping; Identity (current role and schema)
+    shutdown/                   # SIGINT/SIGTERM context; Group: one component exits, all stop
+    httpserver/                 # serve until the context ends, then drain with a timeout
+  archtest/                     # import-boundary test
 ```
+
+Not created until the step that first uses them: `platform/kafka` and `platform/outbox`
+(Step 3, the relay: poll → publish → mark) and `platform/consumer` (Step 4, the idempotent
+loop: dedupe + transaction + offset commit).
 
 ```
 cmd/<svc> ──► internal/<svc> ──► internal/platform
@@ -157,8 +170,10 @@ internal/inventory ──✗──► internal/order      (no service imports an
 internal/platform  ──✗──► internal/<svc>      (plumbing never imports business code)
 ```
 
-Where event contracts and service container files live is still open (Open decisions
-#5 and #6).
+Event contracts are defined by each consumer, so there is no shared `internal/events`
+package ([ADR-0007](docs/adr/0007-event-contracts-consumer-defined.md)). `internal/archtest`
+fails on any new top-level `internal/` package until it has an import rule. Where service
+container files live is still open (Open decision #4).
 
 ## Conventions
 
@@ -189,6 +204,20 @@ Where event contracts and service container files live is still open (Open decis
 - A change to topics, partition counts, message format, or delivery behaviour updates
   [docs/kafka.md](docs/kafka.md) in the same change.
 
+### Go
+
+- Libraries: `jackc/pgx/v5` for Postgres, `twmb/franz-go` for Kafka (added in Step 3), and
+  the standard library for HTTP, logging, config, and shutdown
+  ([ADR-0008](docs/adr/0008-go-libraries.md)). Any other dependency is a checkpoint.
+- `main` only wires. It owns every pool and client, runs long-lived components in a
+  `shutdown.Group`, and closes the pool after the group has stopped.
+- Each service reads its environment in `internal/<svc>.LoadConfig` through
+  `platform/config`, which reports every missing or invalid variable at once.
+- Event payload types are defined by each consumer, with no shared events package
+  ([ADR-0007](docs/adr/0007-event-contracts-consumer-defined.md)).
+- `make test` runs `go test -race ./...`, including the import-boundary test; `make vet`
+  runs `go vet`.
+
 ### General
 
 - Pin exact versions for container images and Go modules.
@@ -205,13 +234,15 @@ Where event contracts and service container files live is still open (Open decis
 ## Setup
 
 ```bash
-make up     # Postgres + Redpanda, migrations, topics; waits for the one-shot containers
-make seed   # sample inventory (idempotent)
-make help   # every target
+make up          # Postgres + Redpanda, migrations, topics; waits for the one-shot containers
+make seed        # sample inventory (idempotent)
+make test        # unit tests with -race, including the import-boundary test
+make run-order   # Order Service on :8080 (also run-inventory, run-notification)
+make help        # every target
 ```
 
-Go services running on the host connect to Postgres at `localhost:5432` and Kafka at
-`localhost:19092`. Containers use `postgres:5432` and `redpanda:9092`. Redpanda
+Go services running on the host connect to Postgres at `localhost:5432`, each as its own
+role (the Makefile's `svc_db_url` builds the URLs), and to Kafka at `localhost:19092`. Containers use `postgres:5432` and `redpanda:9092`. Redpanda
 advertises a different address per listener, so a client given the wrong one reaches
 the first broker and then fails when it reconnects. Console UI: http://localhost:8090.
 
@@ -221,20 +252,18 @@ number.
 
 ## Open decisions
 
-Settle these at the Step 2 checkpoint. When one is settled, write an ADR if it meets the
-bar above, update this file and the README, and delete the item here.
+Settle each one at the checkpoint where it first matters. When one is settled, write an ADR
+if it meets the bar above, update this file and the README, and delete the item here.
 
-1. **Order status owner.** Proposed: the Order Service consumes `inventory.events` and
+1. **Order status owner** (Step 5). Proposed: the Order Service consumes `inventory.events` and
    updates its own `orders.orders`. The original brief had the Notification Service write
    it.
-2. **Inventory event names.** Proposed: name them as facts in the publisher's domain
+2. **Inventory event names** (Step 4). Proposed: name them as facts in the publisher's domain
    (`inventory.reserved`, `inventory.reservation_failed`). The brief used
    `order.reserved` / `order.failed`.
-3. **Topic layout.** Currently implemented as one topic per publishing service, with
-   the event type in a header. The alternative is one topic per event type.
-4. **Go libraries.** Proposed: `jackc/pgx/v5` and `twmb/franz-go`.
-5. **Event contracts.** One shared `internal/events` package, or each consumer defining
-   the fields it reads.
-6. **Service containers.** Proposed: services run on the host with `go run` through
+3. **Topic layout** (Step 2b, when the first event is written). Currently implemented as
+   one topic per publishing service, with the event type in a header. The alternative is
+   one topic per event type.
+4. **Service containers** (after Step 5). Proposed: services run on the host with `go run` through
    Step 5. After that, add a Dockerfile plus one compose file per service, pulled into the
    root file with `include:`.

@@ -53,8 +53,8 @@ flowchart LR
 
 ### Services and data ownership
 
-One Postgres database with **one schema per service**, and (from Step 2) one Postgres
-role per service that can reach only its own schema. A service reads and writes only
+One Postgres database with **one schema per service**, and one Postgres role per service
+(migration `000004`) that can reach only its own schema. A service reads and writes only
 its own schema and learns about other services' data only through events. (That's why
 `inventory.reservations.order_id` is deliberately *not* a foreign key.) Why sharing one
 database is acceptable here, and what it costs:
@@ -89,7 +89,7 @@ guarantee means, and how failures play out: [docs/kafka.md](docs/kafka.md).
 | Topic              | Partitions | Event types                                                                  |
 | ------------------ | ---------- | ---------------------------------------------------------------------------- |
 | `orders.events`    | 3          | `order.created`                                                              |
-| `inventory.events` | 3          | stock reserved / reservation failed (names settled at the Step 2 checkpoint) |
+| `inventory.events` | 3          | stock reserved / reservation failed (names settled at the Step 4 checkpoint) |
 
 
 Topic auto-creation is **disabled**: producing to a misspelled topic fails loudly
@@ -131,6 +131,8 @@ as ADRs:
 | [0004](docs/adr/0004-idempotent-consumers.md) | Idempotent consumers: dedupe in the side-effect transaction, then commit the offset |
 | [0005](docs/adr/0005-single-module-shared-platform.md) | One Go module: shared platform code, service packages isolated by import rules |
 | [0006](docs/adr/0006-outbox-relay-polling-retries.md) | Outbox relay: polling with backoff retries and per-order ordering |
+| [0007](docs/adr/0007-event-contracts-consumer-defined.md) | Event contracts: each consumer defines the fields it reads |
+| [0008](docs/adr/0008-go-libraries.md) | Go libraries: pgx, franz-go, and the standard library for the rest |
 
 Decisions still open are listed in [AGENTS.md](AGENTS.md#open-decisions).
 
@@ -145,7 +147,7 @@ Decisions still open are listed in [AGENTS.md](AGENTS.md#open-decisions).
 ### Prerequisites
 
 - Docker Desktop (or Docker Engine + Compose v2)
-- Go 1.26+ (from Step 2 onwards)
+- Go 1.26+
 - `make`
 
 
@@ -160,15 +162,32 @@ make seed    # load sample inventory (safe to re-run)
 `make up` waits until the one-shot `migrate` and `redpanda-init` containers exit
 successfully.
 
+### Run the services
+
+Each service runs on your host, in its own terminal, and connects to Postgres as its own
+role:
+
+```bash
+make run-order          # Order Service, HTTP on :8080
+make run-inventory      # Inventory Service
+make run-notification   # Notification Service
+```
+
+Until Step 2b the services only start, connect, check that they landed in their own schema,
+and shut down cleanly on Ctrl+C. The Order Service's `GET /healthz` returns 200 while its
+database is reachable and 503 while it isn't.
+
 ### Endpoints
 
 
 | What                  | From your host                                                            | From inside compose |
 | --------------------- | ------------------------------------------------------------------------- | ------------------- |
-| PostgreSQL            | `postgres://orderflow:orderflow@localhost:5432/orderflow?sslmode=disable` | `postgres:5432`     |
+| PostgreSQL (admin)    | `postgres://orderflow:orderflow@localhost:5432/orderflow?sslmode=disable` | `postgres:5432`     |
+| PostgreSQL (services) | `postgres://order_svc:order_svc@localhost:5432/orderflow?sslmode=disable`, likewise `inventory_svc` and `notification_svc` | `postgres:5432` |
 | Kafka API (Redpanda)  | `localhost:19092`                                                         | `redpanda:9092`     |
 | Redpanda Admin API    | `http://localhost:9644`                                                   | `redpanda:9644`     |
 | Redpanda Console (UI) | [http://localhost:8090](http://localhost:8090)                            | —                   |
+| Order Service HTTP    | `http://localhost:8080` (`GET /healthz`)                                  | —                   |
 
 
 Redpanda advertises **two listeners** because a Kafka client first connects to a
@@ -179,9 +198,11 @@ Containers need `redpanda:9092`; processes on your host need `localhost:19092`.
 
 ```bash
 make ps                         # postgres + redpanda healthy, migrate + redpanda-init Exited (0)
-make migrate-version            # 3
+make migrate-version            # 4
 make topics                     # orders.events / inventory.events, 3 partitions each
 make psql                       # then: SELECT * FROM inventory.products;
+make psql-svc svc=order         # same query: permission denied for schema inventory
+make test                       # unit tests, including the import-boundary test
 ```
 
 
@@ -202,6 +223,11 @@ make psql                       # then: SELECT * FROM inventory.products;
 | `make groups`                           | List consumer groups and their state              |
 | `make group-lag group=<name>`           | Per-partition committed offset, high watermark, lag |
 | `make logs svc=postgres`                | Tail logs                                         |
+| `make run-order` / `run-inventory` / `run-notification` | Run a service on the host as its own Postgres role |
+| `make build`                            | Build all three services into `bin/`              |
+| `make test` / `make vet`                | Unit tests with `-race`, including the import-boundary test / `go vet` |
+| `make tidy`                             | Sync `go.mod` and `go.sum` with the imports       |
+| `make psql-svc svc=order`               | psql as a service role, to try its limits         |
 
 
 
@@ -232,6 +258,8 @@ make psql                       # then: SELECT * FROM inventory.products;
 | Redpanda         | v26.2.2 | Kafka API-compatible, single binary, fast local startup    |
 | Redpanda Console | v3.8.0  | Browse messages and consumer lag                           |
 | golang-migrate   | v4.19.1 | Plain SQL up/down migrations                               |
+| pgx              | v5.11.0 | Postgres driver and pool with typed SQLSTATE errors ([ADR-0008](docs/adr/0008-go-libraries.md)) |
+| franz-go         | from Step 3 | Kafka client for the outbox relay and consumers ([ADR-0008](docs/adr/0008-go-libraries.md)) |
 
 
 ---
@@ -241,8 +269,9 @@ make psql                       # then: SELECT * FROM inventory.products;
 ## Roadmap
 
 - [x] **Step 1: Infrastructure and schema.** Docker Compose, migrations, topics, seed data.
-- [ ] **Step 2: Order Service and outbox write.** Per-service Postgres roles; Go module skeleton with the import-boundary test; `POST /orders` writes order + outbox in one transaction; HTTP idempotency key.
-- [ ] **Step 3: Outbox relay.** `internal/platform/outbox`: polling every 250 ms with `FOR UPDATE SKIP LOCKED`, batching, publish-then-mark, capped exponential backoff, parking events that can't be published, per-order ordering ([ADR-0006](docs/adr/0006-outbox-relay-polling-retries.md)); migration `000004` for retry columns.
+- [x] **Step 2a: Go skeleton.** One module with `internal/platform` (config, pg, shutdown, httpserver); three services that start, check their Postgres role, and shut down cleanly; per-service Postgres roles (migration `000004`); import-boundary test.
+- [ ] **Step 2b: Order Service and outbox write.** `POST /orders` writes order + outbox in one transaction; HTTP idempotency key.
+- [ ] **Step 3: Outbox relay.** `internal/platform/outbox`: polling every 250 ms with `FOR UPDATE SKIP LOCKED`, batching, publish-then-mark, capped exponential backoff, parking events that can't be published, per-order ordering ([ADR-0006](docs/adr/0006-outbox-relay-polling-retries.md)); migration `000005` for retry columns.
 - [ ] **Step 4: Inventory Service.** Consume `order.created`, lock rows, reserve stock, dedupe, publish the result via its own outbox.
 - [ ] **Step 5: Status update and Notification Service.** Close the loop; idempotent side effects.
 - [ ] **Step 6: Query endpoints.** Order status and current inventory.
@@ -262,6 +291,9 @@ make psql                       # then: SELECT * FROM inventory.products;
 
 ```
 .
+├── cmd/                   # one main package per service: wiring only
+├── internal/              # service packages + internal/platform (shared mechanics)
+├── go.mod, go.sum         # one Go module (ADR-0005)
 ├── docker-compose.yml     # postgres, migrate, redpanda, redpanda-init, console
 ├── Makefile               # dev workflow (make help)
 ├── migrations/            # golang-migrate SQL: NNNNNN_<name>.up.sql + .down.sql pairs, flat
@@ -273,8 +305,7 @@ make psql                       # then: SELECT * FROM inventory.products;
 └── CLAUDE.md              # Claude's pair-programming role; imports AGENTS.md
 ```
 
-Go code arrives in Step 2 as `cmd/<service>/` plus
-`internal/{order,inventory,notification,platform}/`. The full layout and import rules
-are in [AGENTS.md](AGENTS.md#project-structure) and
-[ADR-0005](docs/adr/0005-single-module-shared-platform.md).
+The Go layout and its import rules are in [AGENTS.md](AGENTS.md#project-structure) and
+[ADR-0005](docs/adr/0005-single-module-shared-platform.md); `internal/archtest` enforces
+them.
 

@@ -37,6 +37,6 @@ operational overhead on a laptop without teaching anything extra.
   or upgrade.
 - Moving a service to its own database later only changes its connection string, as
   long as the one-schema-per-transaction rule holds.
-- **Not implemented yet.** Today every connection uses the `orderflow` admin user. Add
-  the per-service roles (a migration plus per-service connection strings) before Step 2
-  code connects to the database.
+- Implemented in migration `000004_service_roles`: each role gets `USAGE` on its own
+  schema, only the table privileges it needs (no `DELETE`, no DDL), and its `search_path`.
+  Each service checks `current_schema()` at startup and refuses to run as the wrong role.

@@ -6,13 +6,15 @@ guarantees, and what happens when something fails.
 - **Settings** in this document were read from the running broker (Redpanda v26.2.2).
 - **Design** comes from [ADR-0001](adr/0001-kafka-protocol-via-redpanda.md) (Kafka protocol),
   [ADR-0003](adr/0003-transactional-outbox.md) (outbox),
-  [ADR-0004](adr/0004-idempotent-consumers.md) (idempotent consumers), and
-  [ADR-0006](adr/0006-outbox-relay-polling-retries.md) (outbox relay).
+  [ADR-0004](adr/0004-idempotent-consumers.md) (idempotent consumers),
+  [ADR-0006](adr/0006-outbox-relay-polling-retries.md) (outbox relay),
+  [ADR-0007](adr/0007-event-contracts-consumer-defined.md) (event contracts), and
+  [ADR-0008](adr/0008-go-libraries.md) (franz-go as the Kafka client).
 - Anything marked **proposed** is still an open decision in
   [AGENTS.md](../AGENTS.md#open-decisions) and gets settled at the checkpoint named.
 
-**Status:** both topics exist and are empty. No producers or consumers exist until the Go
-services arrive (Step 2 onward).
+**Status:** both topics exist and are empty. The Go services exist (Step 2a) but don't touch
+Kafka yet: the outbox relay arrives in Step 3 and the consumers in Steps 4 and 5.
 
 ## At a glance
 
@@ -71,8 +73,9 @@ Both topics use broker defaults; nothing is overridden per topic.
 ## Message anatomy
 
 Each message is built from one outbox row. The key and the source of each field are
-decided; header names and payload shape are **proposed** and settle at the Step 2 and 3
-checkpoints (open decision #5).
+decided; header names and payload shape are **proposed** and settle at the Step 2b and 3
+checkpoints. Each consumer defines the fields it reads, so the payloads documented here are
+the contract ([ADR-0007](adr/0007-event-contracts-consumer-defined.md)).
 
 | Part | Content | From outbox column | Status |
 |---|---|---|---|
@@ -149,7 +152,7 @@ Step 3.
 | Failure retrying can't fix | Row parked (no more retries) with an alert; that order's later events wait behind it |
 | Health signals | Outbox lag (age of the oldest unpublished row) and the parked-row count |
 
-`next_attempt_at` and the parked marker don't exist yet; migration `000004` adds them. A
+`next_attempt_at` and the parked marker don't exist yet; migration `000005` adds them. A
 `LISTEN/NOTIFY` wake-up and a Debezium CDC relay are stretch steps on the roadmap.
 
 ## Delivery guarantees, end to end
@@ -210,8 +213,8 @@ sequenceDiagram
 | Starting position for a new group | `earliest`, so a new consumer processes the backlog (proposed), vs `latest` | Step 4 checkpoint |
 | Relay claiming | Batch size; holding row locks while producing vs a lease; several relay instances without breaking per-order ordering | Step 3 checkpoint |
 | Consumer retries, backoff, dead-letter topics | e.g. a `<topic>.dlq` topic per consumed topic | Step 7 checkpoint |
-| Event names, topic layout, event contracts | Open decisions #2, #3, #5 | Step 2 checkpoint |
-| Go Kafka client | `twmb/franz-go` proposed (open decision #4) | Step 2 checkpoint |
+| Topic layout | One topic per publishing service (implemented) vs one per event type: open decision #3 | Step 2b checkpoint |
+| Inventory event names | Open decision #2 | Step 4 checkpoint |
 
 ## Operating it locally
 
