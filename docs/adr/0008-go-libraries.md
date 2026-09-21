@@ -1,6 +1,9 @@
 ---
-status: accepted
+status: superseded by 0011
 ---
+
+> Superseded by [ADR-0011](0011-go-libraries-gin-uuid.md): HTTP moves to Gin and order IDs
+> use google/uuid. The pgx and franz-go choices below still stand.
 
 # Go libraries: pgx, franz-go, and the standard library for the rest
 

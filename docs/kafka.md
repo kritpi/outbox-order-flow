@@ -9,7 +9,7 @@ guarantees, and what happens when something fails.
   [ADR-0004](adr/0004-idempotent-consumers.md) (idempotent consumers),
   [ADR-0006](adr/0006-outbox-relay-polling-retries.md) (outbox relay),
   [ADR-0007](adr/0007-event-contracts-consumer-defined.md) (event contracts),
-  [ADR-0008](adr/0008-go-libraries.md) (franz-go as the Kafka client), and
+  [ADR-0011](adr/0011-go-libraries-gin-uuid.md) (franz-go as the Kafka client), and
   [ADR-0009](adr/0009-one-topic-per-publishing-service.md) (one topic per publishing service).
 - Anything marked **proposed** is still an open decision in
   [AGENTS.md](../AGENTS.md#open-decisions) and gets settled at the checkpoint named.
@@ -179,7 +179,7 @@ Step 3.
 | Failure retrying can't fix | Row parked (no more retries) with an alert; that order's later events wait behind it |
 | Health signals | Outbox lag (age of the oldest unpublished row) and the parked-row count |
 
-`next_attempt_at` and the parked marker don't exist yet; migration `000005` adds them. A
+`next_attempt_at` and the parked marker don't exist yet; migration `000006` adds them. A
 `LISTEN/NOTIFY` wake-up and a Debezium CDC relay are stretch steps on the roadmap.
 
 ## Delivery guarantees, end to end
