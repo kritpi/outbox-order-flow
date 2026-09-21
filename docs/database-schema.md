@@ -1,12 +1,27 @@
 # Database schema
 
-Entity-relationship diagrams for the `orderflow` database as of migration `000003`. The
-SQL in [`migrations/`](../migrations/) is the source of truth; update this file in the
-same change as any migration.
+Entity-relationship diagrams and role privileges for the `orderflow` database as of
+migration `000004`. The SQL in [`migrations/`](../migrations/) is the source of truth;
+update this file in the same change as any migration.
 
 The database has one schema per service
 ([ADR-0002](adr/0002-shared-database-schema-per-service.md)). golang-migrate's own
 `public.schema_migrations` table is not shown.
+
+## Roles and privileges
+
+Migrations and `make psql` run as the `orderflow` admin. Each service connects as its own
+role, which reaches only its own schema:
+
+| Role | Schema and `search_path` | Table privileges | Not granted |
+|---|---|---|---|
+| `order_svc` | `orders` | `SELECT`, `INSERT`, `UPDATE` | `DELETE`, DDL, any other schema |
+| `inventory_svc` | `inventory` | `SELECT`, `INSERT`, `UPDATE` | `DELETE`, DDL, any other schema |
+| `notification_svc` | `notification` | `SELECT`, `INSERT` | `UPDATE` (the log is append-only), `DELETE`, DDL, any other schema |
+
+Default privileges extend these grants to tables that later migrations create in the same
+schema. A query against another service's schema fails with `permission denied for schema
+…`. Try it with `make psql-svc svc=order`.
 
 ## Reading the diagrams
 

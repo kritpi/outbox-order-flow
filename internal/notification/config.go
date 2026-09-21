@@ -1,0 +1,23 @@
+// Package notification is the Notification Service: it consumes inventory results and
+// records a (mock) notification per event.
+package notification
+
+import "github.com/kritpi/outbox-order-flow/internal/platform/config"
+
+// Schema is the only Postgres schema this service may use (ADR-0002).
+const Schema = "notification"
+
+// Config is everything the Notification Service reads from its environment.
+type Config struct {
+	DatabaseURL string
+	DBMaxConns  int
+}
+
+// LoadConfig reads Config from env and reports every missing or invalid variable at once.
+func LoadConfig(env *config.Env) (Config, error) {
+	cfg := Config{
+		DatabaseURL: env.Required("DATABASE_URL"),
+		DBMaxConns:  env.Int("DB_MAX_CONNS", 2),
+	}
+	return cfg, env.Err()
+}
