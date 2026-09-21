@@ -44,7 +44,8 @@ flow that is eventually consistent anyway.
 
 ## Consequences
 
-- Needs migration `000005`: `next_attempt_at` and a parked marker on both outbox tables,
+- Needs migration `000006` (`000005` went to the order-ID default, ADR-0012):
+  `next_attempt_at` and a parked marker on both outbox tables,
   with the partial index covering due, unpublished rows.
 - **Outbox lag** (age of the oldest unpublished row) and the **parked-row count** are the
   relay's health signals. A parked row holds its order until a person fixes it.

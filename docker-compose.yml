@@ -98,8 +98,8 @@ services:
         # typo'd topic name fails loudly instead of silently creating a new topic.
         rpk cluster config set auto_create_topics_enabled false
 
-        # One topic per publishing aggregate; event_type travels in a header.
-        # (Layout still to be confirmed: AGENTS.md open decision #3.)
+        # One topic per publishing service; event_type travels in a header, so all of
+        # an order's events share one partition (ADR-0009).
         # 3 partitions so we can observe keyed ordering and consumer-group rebalances.
         for topic in orders.events inventory.events; do
           rpk topic create "$$topic" --partitions 3 --replicas 1 --if-not-exists
