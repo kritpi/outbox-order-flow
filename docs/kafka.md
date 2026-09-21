@@ -8,8 +8,9 @@ guarantees, and what happens when something fails.
   [ADR-0003](adr/0003-transactional-outbox.md) (outbox),
   [ADR-0004](adr/0004-idempotent-consumers.md) (idempotent consumers),
   [ADR-0006](adr/0006-outbox-relay-polling-retries.md) (outbox relay),
-  [ADR-0007](adr/0007-event-contracts-consumer-defined.md) (event contracts), and
-  [ADR-0008](adr/0008-go-libraries.md) (franz-go as the Kafka client).
+  [ADR-0007](adr/0007-event-contracts-consumer-defined.md) (event contracts),
+  [ADR-0008](adr/0008-go-libraries.md) (franz-go as the Kafka client), and
+  [ADR-0009](adr/0009-one-topic-per-publishing-service.md) (one topic per publishing service).
 - Anything marked **proposed** is still an open decision in
   [AGENTS.md](../AGENTS.md#open-decisions) and gets settled at the checkpoint named.
 
@@ -42,8 +43,12 @@ their own outbox table instead. The Order Service consuming `inventory.events` i
 | `orders.events` | Order Service relay | `inventory-service` | `order.created` | 3 | 1 |
 | `inventory.events` | Inventory Service relay | `order-service` (proposed), `notification-service` | stock reserved / reservation failed (names: open decision #2) | 3 | 1 |
 
-There is one topic per publishing service, and the event type travels in a header. That
-layout is implemented but still open (decision #3). Topics are declared in the
+There is one topic per publishing service, and the event type travels in a header
+([ADR-0009](adr/0009-one-topic-per-publishing-service.md)). Keeping all of an order's
+events in one topic is what puts them on one partition. With a topic per event type,
+`order.created` and a later event for the same order would sit in topics with no order
+between them. A consumer skips event types it doesn't handle by reading the `event_type`
+header, and still advances its offset past them. Topics are declared in the
 `redpanda-init` job in [`docker-compose.yml`](../docker-compose.yml).
 
 ### Topic configuration
@@ -72,22 +77,43 @@ Both topics use broker defaults; nothing is overridden per topic.
 
 ## Message anatomy
 
-Each message is built from one outbox row. The key and the source of each field are
-decided; header names and payload shape are **proposed** and settle at the Step 2b and 3
-checkpoints. Each consumer defines the fields it reads, so the payloads documented here are
-the contract ([ADR-0007](adr/0007-event-contracts-consumer-defined.md)).
+Each message is built from one outbox row. Each consumer defines the fields it reads, so
+the payloads documented here are the contract
+([ADR-0007](adr/0007-event-contracts-consumer-defined.md)).
 
-| Part | Content | From outbox column | Status |
-|---|---|---|---|
-| Key | Order ID (UUID string) | `aggregate_id` | Decided (ADR-0003) |
-| Value | JSON event payload | `payload` | JSON decided; shape proposed |
-| Header `event_id` | Outbox row ID (`uuidv7`), used by consumers for dedupe | `id` | Needed by ADR-0004; name proposed |
-| Header `event_type` | e.g. `order.created` | `event_type` | Proposed (tied to decision #3) |
-| Header `aggregate_type` | `order` | `aggregate_type` | Proposed |
-| Other headers | Trace IDs and similar, copied through | `headers` | Proposed |
-| Timestamp | When the event was recorded | `created_at` | Proposed |
+| Part | Content | From outbox column |
+|---|---|---|
+| Key | Order ID (UUID string) | `aggregate_id` (ADR-0003) |
+| Value | JSON event payload, per event below | `payload` |
+| Header `event_id` | Outbox row ID (`uuidv7`), used by consumers for dedupe (ADR-0004) | `id` |
+| Header `event_type` | e.g. `order.created`; consumers filter on it (ADR-0009) | `event_type` |
+| Header `aggregate_type` | `order` | `aggregate_type` |
+| Other headers | Copied through as-is. Empty (`{}`) until trace context arrives in Step 9 | `headers` |
+| Timestamp | When the event was recorded | `created_at` |
 
-An illustrative `order.created` (not a final contract):
+The relay (Step 3) builds the three named headers from their columns, so a handler never
+writes them into `headers`; storing them twice would let the copies disagree. The outbox
+`headers` column is only for context the columns don't hold, such as a W3C `traceparent`.
+
+**No schema version** travels in the payload or the headers. A publisher changes an event
+only additively, and a breaking change gets a new event type (ADR-0007), so the event type
+already is the version.
+
+### `order.created`
+
+Published by the Order Service to `orders.events` when `POST /orders` accepts an order
+(Step 2b). Read by the Inventory Service to reserve stock.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `order_id` | UUID string | The order. Also the message key, repeated so the payload stands on its own |
+| `customer_id` | UUID string | Who placed it |
+| `items` | array, at least one | `{"sku": string, "quantity": integer > 0}`, one entry per SKU |
+| `occurred_at` | RFC 3339 timestamp | When the order was accepted |
+
+There is deliberately **no `status`**. Who owns order status is open decision #1, so the
+event states only what happened: an order with these lines was accepted. Items are embedded
+because a consumer can't read `orders.order_items` (invariant 1).
 
 ```
 topic:   orders.events   partition: hash(key) mod 3
@@ -97,7 +123,8 @@ headers: event_id=0199a3c2-7f11-70aa-8d01-2f3e4a5b6c7d
          aggregate_type=order
 value:   {"order_id":"0199a3c2-7f10-7b4e-9c2d-5e8f1a2b3c4d",
           "customer_id":"0199a3c2-6e00-7c11-a0b1-c2d3e4f5a6b7",
-          "items":[{"sku":"SKU-KEYBOARD","quantity":2}]}
+          "items":[{"sku":"SKU-KEYBOARD","quantity":2}],
+          "occurred_at":"2026-09-21T10:15:30.123456Z"}
 ```
 
 ## Keys, partitions, and ordering
@@ -213,7 +240,6 @@ sequenceDiagram
 | Starting position for a new group | `earliest`, so a new consumer processes the backlog (proposed), vs `latest` | Step 4 checkpoint |
 | Relay claiming | Batch size; holding row locks while producing vs a lease; several relay instances without breaking per-order ordering | Step 3 checkpoint |
 | Consumer retries, backoff, dead-letter topics | e.g. a `<topic>.dlq` topic per consumed topic | Step 7 checkpoint |
-| Topic layout | One topic per publishing service (implemented) vs one per event type: open decision #3 | Step 2b checkpoint |
 | Inventory event names | Open decision #2 | Step 4 checkpoint |
 
 ## Operating it locally

@@ -86,10 +86,11 @@ flowchart LR
 | `orders.events` | Order Service | Inventory Service | `order.created` |
 | `inventory.events` | Inventory Service | Order Service, Notification Service | stock reserved / reservation failed (Open decisions #2) |
 
-One topic per publishing service, with the event type in a message header. The message
-key is the order ID. Each topic has 3 partitions and replication factor 1, and is
-declared in `redpanda-init`; broker auto-creation is off. The layout itself is Open
-decision #3. Message anatomy, delivery guarantees, and failure behaviour are in
+One topic per publishing service, with the event type in a message header, so all of an
+order's events share one partition ([ADR-0009](docs/adr/0009-one-topic-per-publishing-service.md)).
+The message key is the order ID. Each topic has 3 partitions and replication factor 1,
+and is declared in `redpanda-init`; broker auto-creation is off. Message anatomy, each
+event's payload, delivery guarantees, and failure behaviour are in
 [docs/kafka.md](docs/kafka.md).
 
 ## Architecture invariants
@@ -253,17 +254,15 @@ number.
 ## Open decisions
 
 Settle each one at the checkpoint where it first matters. When one is settled, write an ADR
-if it meets the bar above, update this file and the README, and delete the item here.
+if it meets the bar above, update this file and the README, and delete the item here. Items
+keep their numbers when others are deleted, because issues and docs cite them by number.
 
-1. **Order status owner** (Step 5). Proposed: the Order Service consumes `inventory.events` and
-   updates its own `orders.orders`. The original brief had the Notification Service write
-   it.
-2. **Inventory event names** (Step 4). Proposed: name them as facts in the publisher's domain
-   (`inventory.reserved`, `inventory.reservation_failed`). The brief used
-   `order.reserved` / `order.failed`.
-3. **Topic layout** (Step 2b, when the first event is written). Currently implemented as
-   one topic per publishing service, with the event type in a header. The alternative is
-   one topic per event type.
-4. **Service containers** (after Step 5). Proposed: services run on the host with `go run` through
-   Step 5. After that, add a Dockerfile plus one compose file per service, pulled into the
-   root file with `include:`.
+- **#1 Order status owner** (Step 5). Proposed: the Order Service consumes `inventory.events` and
+  updates its own `orders.orders`. The original brief had the Notification Service write
+  it.
+- **#2 Inventory event names** (Step 4). Proposed: name them as facts in the publisher's domain
+  (`inventory.reserved`, `inventory.reservation_failed`). The brief used
+  `order.reserved` / `order.failed`.
+- **#4 Service containers** (after Step 5). Proposed: services run on the host with `go run` through
+  Step 5. After that, add a Dockerfile plus one compose file per service, pulled into the
+  root file with `include:`.

@@ -79,11 +79,13 @@ consuming `inventory.events` to update order status is still a proposal
 
 ### Topics
 
-One topic per publishing aggregate. The event type travels in a message header, and
+One topic per publishing service. The event type travels in a message header, and
 the message **key is the order ID**, so every event for one order lands on the same
-partition in order. This layout is implemented but still to be confirmed
-([open decisions](AGENTS.md#open-decisions)). How messages flow, what each delivery
-guarantee means, and how failures play out: [docs/kafka.md](docs/kafka.md).
+partition in order. Per-type topics would split one order's events across topics that
+have no order between them
+([ADR-0009](docs/adr/0009-one-topic-per-publishing-service.md)). How messages flow, what
+each delivery guarantee means, what each event's payload holds, and how failures play
+out: [docs/kafka.md](docs/kafka.md).
 
 
 | Topic              | Partitions | Event types                                                                  |
@@ -133,6 +135,8 @@ as ADRs:
 | [0006](docs/adr/0006-outbox-relay-polling-retries.md) | Outbox relay: polling with backoff retries and per-order ordering |
 | [0007](docs/adr/0007-event-contracts-consumer-defined.md) | Event contracts: each consumer defines the fields it reads |
 | [0008](docs/adr/0008-go-libraries.md) | Go libraries: pgx, franz-go, and the standard library for the rest |
+| [0009](docs/adr/0009-one-topic-per-publishing-service.md) | One topic per publishing service, event type in a header |
+| [0010](docs/adr/0010-http-idempotency-post-orders.md) | HTTP idempotency for POST /orders: a required key, detected by the unique index |
 
 Decisions still open are listed in [AGENTS.md](AGENTS.md#open-decisions).
 
